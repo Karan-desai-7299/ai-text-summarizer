@@ -2,26 +2,28 @@ from fastapi import FastAPI, Request
 from pydantic import BaseModel
 from transformers import T5ForConditionalGeneration, T5Tokenizer
 import torch
-import re 
+import re
 from fastapi.templating import Jinja2Templates
 from fastapi.responses import HTMLResponse
-from fastapi.staticfiles import StaticFiles
 
-app = FastAPI(title="Text Summarizer App", description="Text Summarization using T5", version="1.0")
+app = FastAPI(title="Text Summarizer App")
 
-# ✅ Changed from local path to HuggingFace Hub
-model = T5ForConditionalGeneration.from_pretrained("karan-desai-7299/t5-text-summarizer")
-tokenizer = T5Tokenizer.from_pretrained("karan-desai-7299/t5-text-summarizer")
+# Don't load at startup — load only once on first request
+model = None
+tokenizer = None
 
-if torch.backends.mps.is_available():
-    device = torch.device("mps")
-elif torch.cuda.is_available():
-    device = torch.device("cuda")
-else:
-    device = torch.device("cpu")
+def load_model():
+    global model, tokenizer
+    if model is None:
+        tokenizer = T5Tokenizer.from_pretrained("karan-desai-7299/t5-text-summarizer")
+        model = T5ForConditionalGeneration.from_pretrained(
+            "karan-desai-7299/t5-text-summarizer",
+            torch_dtype=torch.float16,  # half precision = half memory
+            low_cpu_mem_usage=True
+        )
+        model.eval()
 
-model.to(device)
-
+device = torch.device("cpu")
 templates = Jinja2Templates(directory=".")
 
 class DialogueInput(BaseModel):
@@ -35,6 +37,7 @@ def clean_data(text):
     return text
 
 def summarize_dialogue(dialogue: str) -> str:
+    load_model()
     dialogue = clean_data(dialogue)
     inputs = tokenizer(
         dialogue,
@@ -42,13 +45,12 @@ def summarize_dialogue(dialogue: str) -> str:
         max_length=512,
         truncation=True,
         return_tensors="pt"
-    ).to(device)
-    model.to(device)
+    )
     targets = model.generate(
         input_ids=inputs["input_ids"],
         attention_mask=inputs["attention_mask"],
         max_length=150,
-        num_beams=4,
+        num_beams=2,
         early_stopping=True
     )
     summary = tokenizer.decode(targets[0], skip_special_tokens=True)
@@ -61,7 +63,4 @@ async def summarize(dialogue_input: DialogueInput):
 
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request):
-    return templates.TemplateResponse(
-        request=request,
-        name="index.html"
-    )
+    return templates.TemplateResponse(request=request, name="index.html")
